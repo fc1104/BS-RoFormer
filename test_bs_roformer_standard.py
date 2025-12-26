@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-BS-RoFormer 测试脚本
-支持批量处理 input 目录下的音频文件，输出到 output 目录
+BS-RoFormer 常规音频分离测试脚本
+平衡速度和质量的配置，适合日常使用
 """
 
 # 修复 OpenBLAS 警告和 GPU 内存管理
@@ -20,9 +20,10 @@ import os
 import sys
 from pathlib import Path
 import glob
+import torchaudio
 
 print("=" * 60)
-print("BS-RoFormer 音频分离测试脚本")
+print("BS-RoFormer 常规音频分离测试脚本")
 print("=" * 60)
 
 # 配置 - 基于脚本所在目录
@@ -33,13 +34,14 @@ SAMPLE_RATE = 44100
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 NUM_STEMS = 6  # 6音轨：vocals, bass, drums, guitar, piano, other
 STEM_NAMES = ['vocals', 'bass', 'drums', 'guitar', 'piano', 'other']
-SEGMENT_LENGTH = 30  # 分段长度（秒），避免 GPU 内存不足
-OVERLAP = 2  # 分段重叠（秒），避免边界问题
+SEGMENT_LENGTH = 30  # 常规模式使用 30 秒分段
+OVERLAP = 2  # 分段重叠（秒）
 
 print(f"使用设备: {DEVICE}")
 print(f"采样率: {SAMPLE_RATE} Hz")
 print(f"音轨数量: {NUM_STEMS}")
 print(f"音轨名称: {', '.join(STEM_NAMES)}")
+print(f"模式: 常规（平衡速度和质量）")
 print()
 
 # 检查设备
@@ -51,15 +53,18 @@ if DEVICE == "cuda":
     print(f"已清理 GPU 缓存")
 print()
 
-# 1. 创建模型
-print("[1/4] 创建模型...")
+# 1. 创建模型（常规配置）
+print("[1/4] 创建常规模型...")
+print("  配置: dim=512, depth=12, time_depth=1, freq_depth=1, hop_length=512")
 model = BSRoformer(
-    dim=512,
-    depth=12,
-    time_transformer_depth=1,
-    freq_transformer_depth=1,
-    num_stems=NUM_STEMS,  # 6个音轨
-    stereo=True
+    dim=512,                      # 模型维度
+    depth=12,                     # Transformer 层数
+    time_transformer_depth=1,     # 时间维度深度（常规配置，速度更快）
+    freq_transformer_depth=1,     # 频率维度深度（常规配置，速度更快）
+    num_stems=NUM_STEMS,          # 6个音轨
+    stereo=True,                  # 立体声
+    stft_hop_length=512,         # 常规跳跃长度
+    flash_attn=True              # 使用 Flash Attention 加速
 )
 model.to(DEVICE)
 model.eval()
@@ -148,6 +153,7 @@ for idx, audio_file in enumerate(audio_files, 1):
                 print(f"  提示: 文件可能已损坏或格式不支持")
                 print(f"  跳过此文件，继续处理下一个...")
                 continue
+        
         duration = len(mix[0]) / sr if len(mix.shape) > 1 else len(mix) / sr
         print(f"  音频信息: {mix.shape}, 采样率: {sr} Hz, 时长: {duration:.2f} 秒")
         
