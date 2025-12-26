@@ -4,11 +4,12 @@ BS-RoFormer 测试脚本
 支持批量处理 input 目录下的音频文件，输出到 output 目录
 """
 
-# 修复 OpenBLAS 警告
+# 修复 OpenBLAS 警告和 GPU 内存管理
 import os
 os.environ['OPENBLAS_NUM_THREADS'] = '1'
 os.environ['OMP_NUM_THREADS'] = '1'
 os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
 import torch
 import librosa
@@ -32,6 +33,8 @@ SAMPLE_RATE = 44100
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 NUM_STEMS = 6  # 6音轨：vocals, bass, drums, guitar, piano, other
 STEM_NAMES = ['vocals', 'bass', 'drums', 'guitar', 'piano', 'other']
+SEGMENT_LENGTH = 30  # 分段长度（秒），避免 GPU 内存不足
+OVERLAP = 2  # 分段重叠（秒），避免边界问题
 
 print(f"使用设备: {DEVICE}")
 print(f"采样率: {SAMPLE_RATE} Hz")
@@ -43,6 +46,9 @@ print()
 if DEVICE == "cuda":
     print(f"GPU: {torch.cuda.get_device_name(0)}")
     print(f"GPU 内存: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+    # 清理 GPU 缓存
+    torch.cuda.empty_cache()
+    print(f"已清理 GPU 缓存")
 print()
 
 # 1. 创建模型
@@ -107,13 +113,59 @@ for idx, audio_file in enumerate(audio_files, 1):
         # 转换为张量格式 (batch, channels, samples)
         if len(mix.shape) == 1:
             mix = np.stack([mix, mix])  # 单声道转立体声
-        mix_tensor = torch.from_numpy(mix).float().unsqueeze(0).to(DEVICE)
-        print(f"  输入张量形状: {mix_tensor.shape}")
         
-        # 进行分离
-        print("  执行音频分离...")
-        with torch.no_grad():
-            separated = model(mix_tensor)  # 输出形状: (batch, stems, channels, samples)
+        # 分段处理（避免 GPU 内存不足）
+        total_samples = mix.shape[1]
+        segment_samples = int(SEGMENT_LENGTH * SAMPLE_RATE)
+        overlap_samples = int(OVERLAP * SAMPLE_RATE)
+        
+        if total_samples > segment_samples:
+            print(f"  音频较长 ({duration:.1f}秒)，将分段处理（每段 {SEGMENT_LENGTH} 秒）...")
+            all_separated = []
+            
+            for start_idx in range(0, total_samples, segment_samples - overlap_samples):
+                end_idx = min(start_idx + segment_samples, total_samples)
+                segment = mix[:, start_idx:end_idx]
+                
+                # 如果最后一段太短，从后往前取
+                if end_idx - start_idx < segment_samples // 2 and start_idx > 0:
+                    start_idx = max(0, total_samples - segment_samples)
+                    end_idx = total_samples
+                    segment = mix[:, start_idx:end_idx]
+                
+                segment_tensor = torch.from_numpy(segment).float().unsqueeze(0).to(DEVICE)
+                
+                # 清理 GPU 缓存
+                if DEVICE == "cuda":
+                    torch.cuda.empty_cache()
+                
+                print(f"    处理段: {start_idx/SAMPLE_RATE:.1f}s - {end_idx/SAMPLE_RATE:.1f}s")
+                with torch.no_grad():
+                    segment_separated = model(segment_tensor)
+                
+                # 转换到 CPU 并保存
+                segment_separated = segment_separated.cpu()
+                all_separated.append(segment_separated)
+            
+            # 拼接所有分段
+            print(f"  拼接 {len(all_separated)} 个分段...")
+            separated = torch.cat(all_separated, dim=-1)
+            # 裁剪到原始长度（去除重叠部分）
+            if separated.shape[-1] > total_samples:
+                separated = separated[..., :total_samples]
+        else:
+            # 短音频直接处理
+            mix_tensor = torch.from_numpy(mix).float().unsqueeze(0).to(DEVICE)
+            print(f"  输入张量形状: {mix_tensor.shape}")
+            print("  执行音频分离...")
+            
+            if DEVICE == "cuda":
+                torch.cuda.empty_cache()
+            
+            with torch.no_grad():
+                separated = model(mix_tensor)  # 输出形状: (batch, stems, channels, samples)
+                separated = separated.cpu()
+        
         print(f"  分离结果形状: {separated.shape}")
         
         # 保存结果
@@ -123,10 +175,14 @@ for idx, audio_file in enumerate(audio_files, 1):
         
         print(f"  保存结果到: {track_output_dir}/")
         for i, stem_name in enumerate(STEM_NAMES):
-            stem_audio = separated[0, i].cpu().numpy()  # 移除batch维度并转到CPU
+            stem_audio = separated[0, i].numpy()  # 移除batch维度（已在CPU）
             output_path = os.path.join(track_output_dir, f"{stem_name}.wav")
             sf.write(output_path, stem_audio.T, sr)
             print(f"    ✓ {stem_name}.wav")
+        
+        # 清理 GPU 缓存
+        if DEVICE == "cuda":
+            torch.cuda.empty_cache()
         
         print(f"  ✓ 完成: {os.path.basename(audio_file)}")
         
