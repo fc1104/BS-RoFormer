@@ -4,6 +4,12 @@ BS-RoFormer 测试脚本
 支持批量处理 input 目录下的音频文件，输出到 output 目录
 """
 
+# 修复 OpenBLAS 警告
+import os
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+
 import torch
 import librosa
 import soundfile as sf
